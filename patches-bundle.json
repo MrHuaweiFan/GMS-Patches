@@ -1,0 +1,7 @@
+{
+  "created_at": "2026-08-31T02:11:12",
+  "description": "## [1.0.1](https://github.com/MrHuaweiFan/GMS-Patches/compare/v1.0.0...v1.0.1) (2026-08-31)\n\n### 🐛 Bug Fixes\n\n* keep GMS bind actions literal for ReVanced GmsCore (Gmail sign-in) ([eae192a](https://github.com/MrHuaweiFan/GMS-Patches/commit/eae192a3ed23d1ed96c3584bcff0322040dbb1ae))",
+  "download_url": "https://github.com/MrHuaweiFan/GMS-Patches/releases/download/v1.0.1/patches-1.0.1.mpp",
+  "signature_download_url": "",
+  "version": "1.0.1"
+}

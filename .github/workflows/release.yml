@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, dev ]
+
+jobs:
+  release:
+    name: Release
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # semantic-release determines the next version from git tags that are
+      # REACHABLE from the branch head. Tags left over from replaced histories
+      # are invisible to it, so it treats every push as the repository's FIRST
+      # release, computes v1.0.0 and then fails with:
+      #   ExecaError: git tag v1.0.0 <sha> -> fatal: tag 'v1.0.0' already exists
+      # This step removes such orphaned tags (and the GitHub releases attached
+      # to them). If no version tag is reachable at all, it places a marker tag
+      # at the HIGHEST VERSION EVER RELEASED (captured before pruning) plus an
+      # empty fix commit, so the next release is always exactly one patch bump
+      # above everything published before. A hardcoded marker would re-release
+      # the same version number on every full-zip import, and patch managers
+      # that cache by version tag would never pick up the new content.
+      - name: Repair release state
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          max_ver=$(gh release list --limit 100 --json tagName --jq '
+            map(select(.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))
+            | map(.tagName | ltrimstr("v"))
+            | sort_by(split(".") | map(tonumber))
+            | last // empty' 2>/dev/null)
+          if [ -z "$max_ver" ]; then
+            max_ver="1.0.1"
+          fi
+          echo "repair: highest released version: v${max_ver}"
+          reachable=0
+          for tag in $(git tag); do
+            sha=$(git rev-parse -q --verify "$tag^{commit}" 2>/dev/null)
+            if [ -n "$sha" ] && git merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
+              echo "repair: keep $tag ($sha) - reachable from HEAD"
+              reachable=1
+            else
+              echo "repair: prune orphaned $tag (${sha:-unresolved})"
+              if gh release view "$tag" >/dev/null 2>&1; then
+                gh release delete "$tag" --yes --cleanup-tag
+              fi
+              git push origin --delete "refs/tags/$tag" >/dev/null 2>&1
+              git tag -d "$tag" >/dev/null 2>&1
+            fi
+          done
+          if [ "$reachable" -eq 0 ] && [ "${GITHUB_REF_TYPE:-branch}" = "branch" ]; then
+            echo "repair: no reachable version tag - placing v${max_ver} marker and fix commit"
+            git tag -d "v${max_ver}" >/dev/null 2>&1
+            git tag "v${max_ver}"
+            git push origin "refs/tags/v${max_ver}" >/dev/null 2>&1
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                commit --allow-empty \
+                -m "fix: release bookkeeping [skip ci]"
+            git push origin "HEAD:${GITHUB_REF_NAME}" >/dev/null 2>&1
+          fi
+          exit 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v5.7.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      # Semantic release runs its own Gradle build command.
+      # Only dev and main branch will generate a release as specified by .releaserc
+      - name: Release
+        uses: cycjimmy/semantic-release-action@v6
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest
+        if: steps.release.outputs.new_release_published == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: 'Morphe Patches ${{ steps.release.outputs.new_release_git_tag }}'
+          subject-path: patches/build/libs/patches-*.mpp
