@@ -1,3 +1,9 @@
+## [1.0.4](https://github.com/MrHuaweiFan/GMS-Patches/compare/v1.0.3...v1.0.4) (2026-08-31)
+
+### 🐛 Bug Fixes
+
+* release bookkeeping [skip ci] ([8f8aa95](https://github.com/MrHuaweiFan/GMS-Patches/commit/8f8aa9517ced10bbb781e296027cf3a5706738e1))
+
 ## [1.0.1](https://github.com/MrHuaweiFan/GMS-Patches/compare/v1.0.0...v1.0.1) (2026-08-31)
 
 ### 🐛 Bug Fixes
