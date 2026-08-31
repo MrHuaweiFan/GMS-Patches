@@ -1,0 +1,232 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  release:
+    name: Release
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # semantic-release was removed in v1.0.5. It fundamentally assumed an
+      # append-only git history, which does not hold here: full-zip pushes
+      # create a brand-new history every time, so every older tag looked
+      # "orphaned" and the old "Repair release state" bootstrap responded by
+      # deleting the GitHub releases attached to them. That is why every push
+      # wiped the release list while the tags stuck around.
+      #
+      # This pipeline is deterministic instead:
+      #   * next version = highest version found ANYWHERE (remote tags +
+      #     GitHub releases, regardless of reachability) + one bump
+      #   * bump level comes from the commits being released
+      #     (feat -> minor, anything else -> patch)
+      #   * a release is published on EVERY push to main -- no conventional
+      #     commit required to get a release (commit prefixes only control
+      #     the changelog section and the bump level)
+      #   * nothing is ever deleted: old releases and tags are never touched
+      - name: Setup Java
+        uses: actions/setup-java@v5.7.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Cache Gradle
+        uses: burrunan/gradle-cache-action@v3
+
+      - name: Compute next version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Guard against double-releasing the same commit.
+          head_subject="$(git log -1 --pretty=%s HEAD)"
+          if [[ "$head_subject" == "chore: Release v"* ]]; then
+            echo "HEAD is already a release commit - nothing to do."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Every version that exists anywhere: remote tags + releases.
+          # (Deleting a release or a tag manually can never cause a version
+          # collision, because the maximum is taken over the union.)
+          git fetch --tags --force origin -q || true
+          {
+            git ls-remote --tags origin \
+              | sed -n 's#.*refs/tags/\(v\?[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$#\1#p' \
+              | sed 's/^v//'
+            gh release list --limit 200 --json tagName --jq '.[].tagName' \
+              | sed -n 's/^v\?\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p'
+          } | sort -uV | tail -n 1 > /tmp/last_version
+          last="$(cat /tmp/last_version)"
+          if [ -z "$last" ]; then last="0.0.0"; fi
+          echo "Highest existing version anywhere: v${last}"
+
+          # Commits being released: reachable from HEAD, not reachable from
+          # any tag. Works for fresh-history pushes (all commits) as well as
+          # normal incremental pushes (only the new ones).
+          # Lines are "<40-hex-sha>TAB<subject>"; subject is matched after the
+          # tab so the hex sha can never match a pattern meant for subjects.
+          # tformat (not format): every line needs its trailing newline,
+          # otherwise the final commit is invisible to "while read" loops.
+          git log --pretty='tformat:%H%x09%s' HEAD --not --tags > /tmp/commits.tsv || true
+          if [ ! -s /tmp/commits.tsv ]; then
+            echo "no unreleased commits - releasing a maintenance patch"
+          fi
+
+          bump="patch"
+          if grep -qP '^[0-9a-f]{40}\t[a-zA-Z]+(\([^)]*\))?!:' /tmp/commits.tsv 2>/dev/null \
+             || grep -qi 'BREAKING CHANGE' /tmp/commits.tsv 2>/dev/null; then
+            bump="major"
+          elif grep -qiP '^[0-9a-f]{40}\t(feat|feature)(\([^)]*\))?!?:' /tmp/commits.tsv 2>/dev/null; then
+            bump="minor"
+          fi
+
+          IFS='.' read -r a b c <<< "$last"
+          case "$bump" in
+            major) a=$((a + 1)); b=0; c=0 ;;
+            minor) b=$((b + 1)); c=0 ;;
+            patch) c=$((c + 1)) ;;
+          esac
+          next="${a}.${b}.${c}"
+          # A repository with no versions anywhere starts at 1.0.0.
+          if [ ! -s /tmp/last_version ]; then
+            next="1.0.0"
+          fi
+          echo "Releasing v${next} (bump: ${bump}, unreleased commits: $(wc -l < /tmp/commits.tsv | tr -d ' '))"
+          {
+            echo "released=true"
+            echo "version=${next}"
+            echo "tag=v${next}"
+            echo "last=${last}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build patch bundle
+        if: steps.version.outputs.released == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NEXT="${{ steps.version.outputs.version }}"
+          sed -i "s/^version *=.*/version = ${NEXT}/" gradle.properties
+          # Re-assert the wrapper's exec bit: zip extraction on Android often
+          # drops it, and git then carries gradlew as a non-executable file
+          # ("./gradlew: Permission denied", exit 126). chmod makes the build
+          # independent of how the tree was extracted/committed.
+          chmod +x gradlew
+          # Two invocations on purpose: task order must be guaranteed
+          # (generatePatchesList runs the full build via dependsOn(build),
+          # exactly like the old SR prepareCmd did; buildAndroid is then a
+          # mostly-cached no-op that guarantees the .mpp exists).
+          ./gradlew generatePatchesList --no-daemon
+          ./gradlew :patches:buildAndroid --no-daemon
+          jq --arg v "$NEXT" '.version = $v' patches-list.json > patches-list.json.tmp \
+            && mv patches-list.json.tmp patches-list.json
+          ls -la patches/build/libs/
+          test -f "patches/build/libs/patches-${NEXT}.mpp"
+
+      - name: Generate release notes and update metadata
+        if: steps.version.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NEXT="${{ steps.version.outputs.version }}"
+          LAST="${{ steps.version.outputs.last }}"
+          TAG="v${NEXT}"
+          DATE="$(date +%F)"
+          REPO="${GITHUB_REPOSITORY}"
+
+          emit_section() {
+            title="$1"; pattern="$2"; found=0
+            while IFS=$'\t' read -r sha subj; do
+              if echo "$subj" | grep -qiE "$pattern"; then
+                if [ "$found" -eq 0 ]; then echo "### $title"; found=1; fi
+                desc="$(echo "$subj" | sed -E 's/^[a-zA-Z]+(\([^)]*\))?!?:[[:space:]]*//')"
+                echo "* ${desc} ([${sha:0:7}](https://github.com/${REPO}/commit/${sha}))"
+              fi
+            done < /tmp/commits.tsv
+          }
+
+          {
+            emit_section "✨ New Features" '^(feat|feature)(\(|!|:)'
+            emit_section "🐛 Bug Fixes" '^(fix)(\(|!|:)'
+            emit_section "🚀 Updated App Support" '^(bump)(\(|!|:)'
+            emit_section "🔧 Improvements" '^(perf)(\(|!|:)'
+            if ! grep -qiP '^[0-9a-f]{40}\t(feat|feature|fix|bump|perf)(\([^)]*\))?!?:' /tmp/commits.tsv; then
+              if [ -s /tmp/commits.tsv ]; then
+                echo "### Other Changes"
+                while IFS=$'\t' read -r sha subj; do
+                  echo "* ${subj} ([${sha:0:7}](https://github.com/${REPO}/commit/${sha}))"
+                done < /tmp/commits.tsv
+              else
+                echo "Maintenance release."
+              fi
+            fi
+          } > /tmp/notes.md
+
+          # Prepend the changelog entry.
+          {
+            echo "## [${NEXT}](https://github.com/${REPO}/compare/v${LAST}...v${NEXT}) (${DATE})"
+            echo ""
+            cat /tmp/notes.md
+            echo ""
+            cat CHANGELOG.md
+          } > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
+
+          # Update the bundle manifest (same shape @MorpheApp/changelog wrote).
+          jq --arg v "$NEXT" \
+             --arg url "https://github.com/${REPO}/releases/download/v${NEXT}/patches-${NEXT}.mpp" \
+             --arg desc "$(cat /tmp/notes.md)" \
+             --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%S')" \
+             '.version = $v | .download_url = $url | .description = $desc
+              | .signature_download_url = "" | .created_at = $ts' \
+             patches-bundle.json > patches-bundle.json.tmp \
+            && mv patches-bundle.json.tmp patches-bundle.json
+
+      - name: Tag, push and publish release
+        if: steps.version.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          NEXT="${{ steps.version.outputs.version }}"
+          TAG="v${NEXT}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gradle.properties CHANGELOG.md patches-bundle.json patches-list.json
+          if git diff --cached --quiet; then
+            echo "no metadata changes to commit; tagging HEAD"
+          else
+            git commit -m "chore: Release ${TAG} [skip ci]"
+          fi
+          git tag "${TAG}"
+          # The branch push carries the release commit; the tag push carries
+          # the tag. Neither triggers this workflow again: the commit message
+          # contains [skip ci] and a tag push does not match the branch filter.
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "refs/tags/${TAG}"
+          gh release create "${TAG}" \
+            --title "${TAG}" \
+            --notes-file /tmp/notes.md \
+            patches/build/libs/patches-${NEXT}.mpp
+
+      - name: Attest
+        if: steps.version.outputs.released == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: 'Morphe Patches ${{ steps.version.outputs.tag }}'
+          subject-path: patches/build/libs/patches-${{ steps.version.outputs.version }}.mpp
