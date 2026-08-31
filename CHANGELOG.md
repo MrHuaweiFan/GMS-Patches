@@ -1,3 +1,8 @@
+## [1.0.5](https://github.com/MrHuaweiFan/GMS-Patches/compare/v1.0.4...v1.0.5) (2026-08-31)
+
+### 🐛 Bug Fixes
+* Drive suite cross-app identity, remove Chrome ([9f182a2](https://github.com/MrHuaweiFan/GMS-Patches/commit/9f182a27b96d5be9c15cfc0cac54a8804b244a3d))
+
 ## [1.0.4](https://github.com/MrHuaweiFan/GMS-Patches/compare/v1.0.3...v1.0.4) (2026-08-31)
 
 ### 🐛 Bug Fixes

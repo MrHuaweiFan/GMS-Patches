@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-08-31T19:30:26",
-  "description": "## [1.0.4](https://github.com/MrHuaweiFan/GMS-Patches/compare/v1.0.3...v1.0.4) (2026-08-31)\n\n### 🐛 Bug Fixes\n\n* release bookkeeping [skip ci] ([8f8aa95](https://github.com/MrHuaweiFan/GMS-Patches/commit/8f8aa9517ced10bbb781e296027cf3a5706738e1))",
-  "download_url": "https://github.com/MrHuaweiFan/GMS-Patches/releases/download/v1.0.4/patches-1.0.4.mpp",
+  "created_at": "2026-08-31T21:19:47",
+  "description": "### 🐛 Bug Fixes\n* Drive suite cross-app identity, remove Chrome ([9f182a2](https://github.com/MrHuaweiFan/GMS-Patches/commit/9f182a27b96d5be9c15cfc0cac54a8804b244a3d))",
+  "download_url": "https://github.com/MrHuaweiFan/GMS-Patches/releases/download/v1.0.5/patches-1.0.5.mpp",
   "signature_download_url": "",
-  "version": "1.0.4"
+  "version": "1.0.5"
 }
